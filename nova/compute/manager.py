@@ -590,6 +590,17 @@ class InstanceEvents(object):
                 eventlet_event.send(event)
 
 
+def locked_volume_operation(instance_id):
+    """Lock decorator for volume attach/detach
+       and delete operations.
+    """
+    def lvo_inner1(f):
+        @utils.synchronized("%s-volume" % instance_id)
+        def lvo_inner2(*_args, **_kwargs):
+            return f(*_args, **_kwargs)
+        return lvo_inner2
+    return lvo_inner1
+
 class ComputeVirtAPI(virtapi.VirtAPI):
     def __init__(self, compute):
         super(ComputeVirtAPI, self).__init__()
@@ -2361,67 +2372,70 @@ class ComputeManager(manager.Manager):
         :param bdms: nova.objects.block_device.BlockDeviceMappingList object
         :param quotas: nova.objects.quotas.Quotas object
         """
-        was_soft_deleted = instance.vm_state == vm_states.SOFT_DELETED
-        if was_soft_deleted:
-            # Instances in SOFT_DELETED vm_state have already had quotas
-            # decremented.
+        @locked_volume_operation(instance.uuid)
+        def inner():
+            was_soft_deleted = instance.vm_state == vm_states.SOFT_DELETED
+            if was_soft_deleted:
+                # Instances in SOFT_DELETED vm_state have already had quotas
+                # decremented.
+                try:
+                    quotas.rollback()
+                except Exception:
+                    pass
+
             try:
-                quotas.rollback()
+                events = self.instance_events.clear_events_for_instance(instance)
+                if events:
+                    LOG.debug('Events pending at deletion: %(events)s',
+                              {'events': ','.join(events.keys())},
+                              instance=instance)
+                self._notify_about_instance_usage(context, instance,
+                                                  "delete.start")
+                self._shutdown_instance(context, instance, bdms)
+                # NOTE(dims): instance.info_cache.delete() should be called after
+                # _shutdown_instance in the compute manager as shutdown calls
+                # deallocate_for_instance so the info_cache is still needed
+                # at this point.
+                if instance.info_cache is not None:
+                    instance.info_cache.delete()
+                else:
+                    # NOTE(yoshimatsu): Avoid AttributeError if instance.info_cache
+                    # is None. When the root cause that instance.info_cache becomes
+                    # None is fixed, the log level should be reconsidered.
+                    LOG.warning(_LW("Info cache for instance could not be found. "
+                                    "Ignore."), instance=instance)
+
+                # NOTE(vish): We have already deleted the instance, so we have
+                #             to ignore problems cleaning up the volumes. It
+                #             would be nice to let the user know somehow that
+                #             the volume deletion failed, but it is not
+                #             acceptable to have an instance that can not be
+                #             deleted. Perhaps this could be reworked in the
+                #             future to set an instance fault the first time
+                #             and to only ignore the failure if the instance
+                #             is already in ERROR.
+                self._cleanup_volumes(context, instance.uuid, bdms,
+                        raise_exc=False)
+                # if a delete task succeeded, always update vm state and task
+                # state without expecting task state to be DELETING
+                instance.vm_state = vm_states.DELETED
+                instance.task_state = None
+                instance.power_state = power_state.NOSTATE
+                instance.terminated_at = timeutils.utcnow()
+                instance.save()
+                self._update_resource_tracker(context, instance)
+                system_meta = instance.system_metadata
+                instance.destroy()
             except Exception:
-                pass
+                with excutils.save_and_reraise_exception():
+                    quotas.rollback()
 
-        try:
-            events = self.instance_events.clear_events_for_instance(instance)
-            if events:
-                LOG.debug('Events pending at deletion: %(events)s',
-                          {'events': ','.join(events.keys())},
-                          instance=instance)
-            self._notify_about_instance_usage(context, instance,
-                                              "delete.start")
-            self._shutdown_instance(context, instance, bdms)
-            # NOTE(dims): instance.info_cache.delete() should be called after
-            # _shutdown_instance in the compute manager as shutdown calls
-            # deallocate_for_instance so the info_cache is still needed
-            # at this point.
-            if instance.info_cache is not None:
-                instance.info_cache.delete()
-            else:
-                # NOTE(yoshimatsu): Avoid AttributeError if instance.info_cache
-                # is None. When the root cause that instance.info_cache becomes
-                # None is fixed, the log level should be reconsidered.
-                LOG.warning(_LW("Info cache for instance could not be found. "
-                                "Ignore."), instance=instance)
-
-            # NOTE(vish): We have already deleted the instance, so we have
-            #             to ignore problems cleaning up the volumes. It
-            #             would be nice to let the user know somehow that
-            #             the volume deletion failed, but it is not
-            #             acceptable to have an instance that can not be
-            #             deleted. Perhaps this could be reworked in the
-            #             future to set an instance fault the first time
-            #             and to only ignore the failure if the instance
-            #             is already in ERROR.
-            self._cleanup_volumes(context, instance.uuid, bdms,
-                    raise_exc=False)
-            # if a delete task succeeded, always update vm state and task
-            # state without expecting task state to be DELETING
-            instance.vm_state = vm_states.DELETED
-            instance.task_state = None
-            instance.power_state = power_state.NOSTATE
-            instance.terminated_at = timeutils.utcnow()
-            instance.save()
-            self._update_resource_tracker(context, instance)
-            system_meta = instance.system_metadata
-            instance.destroy()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                quotas.rollback()
-
-        self._complete_deletion(context,
-                                instance,
-                                bdms,
-                                quotas,
-                                system_meta)
+            self._complete_deletion(context,
+                                    instance,
+                                    bdms,
+                                    quotas,
+                                   system_meta)
+        return inner()
 
     @wrap_exception()
     @reverts_task_state
@@ -4644,25 +4658,28 @@ class ComputeManager(manager.Manager):
 
     def _attach_volume(self, context, instance, bdm):
         context = context.elevated()
-        LOG.info(_LI('Attaching volume %(volume_id)s to %(mountpoint)s'),
-                  {'volume_id': bdm.volume_id,
-                  'mountpoint': bdm['mount_device']},
-                 context=context, instance=instance)
-        try:
-            bdm.attach(context, instance, self.volume_api, self.driver,
-                       do_check_attach=False, do_driver_attach=True)
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                LOG.exception(_LE("Failed to attach %(volume_id)s "
-                                  "at %(mountpoint)s"),
-                              {'volume_id': bdm.volume_id,
-                               'mountpoint': bdm['mount_device']},
-                              context=context, instance=instance)
-                self.volume_api.unreserve_volume(context, bdm.volume_id)
+        @locked_volume_operation(instance.uuid)
+        def inner():
+            LOG.info(_LI('Attaching volume %(volume_id)s to %(mountpoint)s'),
+                      {'volume_id': bdm.volume_id,
+                      'mountpoint': bdm['mount_device']},
+                     context=context, instance=instance)
+            try:
+                bdm.attach(context, instance, self.volume_api, self.driver,
+                           do_check_attach=False, do_driver_attach=True)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    LOG.exception(_LE("Failed to attach %(volume_id)s "
+                                      "at %(mountpoint)s"),
+                                  {'volume_id': bdm.volume_id,
+                                   'mountpoint': bdm['mount_device']},
+                                  context=context, instance=instance)
+                    self.volume_api.unreserve_volume(context, bdm.volume_id)
 
-        info = {'volume_id': bdm.volume_id}
-        self._notify_about_instance_usage(
-            context, instance, "volume.attach", extra_usage_info=info)
+            info = {'volume_id': bdm.volume_id}
+            self._notify_about_instance_usage(
+                context, instance, "volume.attach", extra_usage_info=info)
+        return inner()
 
     def _driver_detach_volume(self, context, instance, bdm):
         """Do the actual driver detach using block device mapping."""
@@ -4715,54 +4732,56 @@ class ComputeManager(manager.Manager):
 
         """
 
-        bdm = objects.BlockDeviceMapping.get_by_volume_id(
-                context, volume_id)
-        if CONF.volume_usage_poll_interval > 0:
-            vol_stats = []
-            mp = bdm.device_name
-            # Handle bootable volumes which will not contain /dev/
-            if '/dev/' in mp:
-                mp = mp[5:]
-            try:
-                vol_stats = self.driver.block_stats(instance, mp)
-            except NotImplementedError:
-                pass
+        @locked_volume_operation(instance.uuid)
+        def inner():
+            bdm = objects.BlockDeviceMapping.get_by_volume_id(
+                    context, volume_id)
+            if CONF.volume_usage_poll_interval > 0:
+                vol_stats = []
+                mp = bdm.device_name
+                # Handle bootable volumes which will not contain /dev/
+                if '/dev/' in mp:
+                    mp = mp[5:]
+                try:
+                    vol_stats = self.driver.block_stats(instance, mp)
+                except NotImplementedError:
+                    pass
 
-            if vol_stats:
-                LOG.debug("Updating volume usage cache with totals",
-                          instance=instance)
-                rd_req, rd_bytes, wr_req, wr_bytes, flush_ops = vol_stats
-                vol_usage = objects.VolumeUsage(context)
-                vol_usage.volume_id = volume_id
-                vol_usage.instance_uuid = instance.uuid
-                vol_usage.project_id = instance.project_id
-                vol_usage.user_id = instance.user_id
-                vol_usage.availability_zone = instance.availability_zone
-                vol_usage.curr_reads = rd_req
-                vol_usage.curr_read_bytes = rd_bytes
-                vol_usage.curr_writes = wr_req
-                vol_usage.curr_write_bytes = wr_bytes
-                vol_usage.save(update_totals=True)
-                self.notifier.info(context, 'volume.usage',
-                                   compute_utils.usage_volume_info(vol_usage))
+                if vol_stats:
+                    LOG.debug("Updating volume usage cache with totals",
+                              instance=instance)
+                    rd_req, rd_bytes, wr_req, wr_bytes, flush_ops = vol_stats
+                    vol_usage = objects.VolumeUsage(context)
+                    vol_usage.volume_id = volume_id
+                    vol_usage.instance_uuid = instance.uuid
+                    vol_usage.project_id = instance.project_id
+                    vol_usage.user_id = instance.user_id
+                    vol_usage.availability_zone = instance.availability_zone
+                    vol_usage.curr_reads = rd_req
+                    vol_usage.curr_read_bytes = rd_bytes
+                    vol_usage.curr_writes = wr_req
+                    vol_usage.curr_write_bytes = wr_bytes
+                    vol_usage.save(update_totals=True)
+                    self.notifier.info(context, 'volume.usage',
+                                       compute_utils.usage_volume_info(vol_usage))
 
-        self._driver_detach_volume(context, instance, bdm)
-        connector = self.driver.get_volume_connector(instance)
-        self.volume_api.terminate_connection(context, volume_id, connector)
+            self._driver_detach_volume(context, instance, bdm)
+            connector = self.driver.get_volume_connector(instance)
+            self.volume_api.terminate_connection(context, volume_id, connector)
 
-        if destroy_bdm:
-            bdm.destroy()
+            if destroy_bdm:
+                bdm.destroy()
 
-        info = dict(volume_id=volume_id)
-        self._notify_about_instance_usage(
-            context, instance, "volume.detach", extra_usage_info=info)
-        self.volume_api.detach(context.elevated(), volume_id)
+            info = dict(volume_id=volume_id)
+            self._notify_about_instance_usage(
+                context, instance, "volume.detach", extra_usage_info=info)
+            self.volume_api.detach(context.elevated(), volume_id)
+        return inner()
 
     @wrap_exception()
     @wrap_instance_fault
     def detach_volume(self, context, volume_id, instance):
         """Detach a volume from an instance."""
-
         self._detach_volume(context, volume_id, instance)
 
     def _init_volume_connection(self, context, new_volume_id,
