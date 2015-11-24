@@ -768,6 +768,17 @@ class ComputeManager(manager.Manager):
             LOG.debug('Instance has been destroyed from under us while '
                       'trying to set it to ERROR', instance=instance)
 
+    def _set_instance_obj_pause_state(self, context, instance,
+                                      clean_task_state=False):
+        try:
+            instance.vm_state = vm_states.PAUSED
+            if clean_task_state:
+                instance.task_state = None
+            instance.save()
+        except exception.InstanceNotFound:
+            LOG.debug('Instance has been destroyed from under us while '
+                      'trying to set it to PAUSED', instance=instance)
+
     def _get_instances_on_driver(self, context, filters=None):
         """Return a list of instance records for the instances found
         on the hypervisor which satisfy the specified filters. If filters=None
@@ -1184,11 +1195,11 @@ class ComputeManager(manager.Manager):
                 LOG.warning(_LW('Hypervisor driver does not support '
                                 'resume guests'), instance=instance)
             except Exception:
-                # NOTE(vish): The instance failed to resume, so we set the
-                #             instance to error and attempt to continue.
-                LOG.warning(_LW('Failed to resume instance'),
+                # NOTE(vish): The instance failed to resume, so we set VM
+                #             to paused state to notify the vm issue
+                LOG.warning(_LW('Failed to resume instance, leave it as it is.'),
                             instance=instance)
-                self._set_instance_obj_error_state(context, instance)
+                self._set_instance_obj_pause_state(context, instance)
 
         elif drv_state == power_state.RUNNING:
             # VMwareAPI drivers will raise an exception
