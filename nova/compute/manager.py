@@ -4193,7 +4193,14 @@ class ComputeManager(manager.Manager):
             instance.save(expected_task_state=expected_state)
 
         self._power_off_instance(context, instance, clean_shutdown)
-        self.driver.snapshot(context, instance, image_id, update_task_state)
+	try:
+	    self.driver.snapshot(context, instance, image_id,
+				 update_task_state)
+	except nova.exception.UnexpectedDeletingTaskStateError:
+	    with excutils.save_and_reraise_exception():
+		image_meta = {'status': 'error'}
+		image_service = glance.get_default_image_service()
+		image_service.update(context, image_id, image_meta)
 
         instance.system_metadata['shelved_at'] = timeutils.strtime()
         instance.system_metadata['shelved_image_id'] = image_id

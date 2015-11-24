@@ -147,6 +147,7 @@ class ViewBuilder(common.ViewBuilder):
             'deleted': 'DELETED',
             'pending_delete': 'DELETED',
             'killed': 'ERROR',
+            'error': 'ERROR',
         }.get(image.get("status"), 'UNKNOWN')
 
     @staticmethod
