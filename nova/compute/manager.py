@@ -3076,8 +3076,14 @@ class ComputeManager(manager.Manager):
                 instance.task_state = task_state
                 instance.save(expected_task_state=expected_state)
 
-            self.driver.snapshot(context, instance, image_id,
-                                 update_task_state)
+            try:
+                self.driver.snapshot(context, instance, image_id,
+                                     update_task_state)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    image_meta = {'status': 'error'}
+                    image_service = glance.get_default_image_service()
+                    image_service.update(context, image_id, image_meta)
 
             instance.task_state = None
             instance.save(expected_task_state=task_states.IMAGE_UPLOADING)

@@ -3108,7 +3108,7 @@ class ComputeTestCase(BaseTestCase):
 
         inst_obj = self._get_snapshotting_instance()
         if method == 'snapshot':
-            self.assertRaises(test.TestingException,
+            self.assertRaises(test.ImageNotFound,
                               self.compute.snapshot_instance,
                               self.context, image_id='fakesnap',
                               instance=inst_obj)
