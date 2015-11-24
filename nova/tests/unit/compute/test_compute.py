@@ -3144,7 +3144,7 @@ class ComputeTestCase(BaseTestCase):
         self._test_snapshot_fails(True, 'snapshot')
 
     def _test_snapshot_deletes_image_on_failure(self, status, exc):
-        self.fake_image_delete_called = False
+        self.fake_image_update_called = False
 
         def fake_show(self_, context, image_id, **kwargs):
             self.assertEqual('fakesnap', image_id)
@@ -3154,11 +3154,11 @@ class ComputeTestCase(BaseTestCase):
 
         self.stubs.Set(fake_image._FakeImageService, 'show', fake_show)
 
-        def fake_delete(self_, context, image_id):
-            self.fake_image_delete_called = True
+        def fake_update(self_, context, image_id, image_meta):
+            self.fake_image_update_called = True
             self.assertEqual('fakesnap', image_id)
 
-        self.stubs.Set(fake_image._FakeImageService, 'delete', fake_delete)
+        self.stubs.Set(fake_image._FakeImageService, 'update', fake_update)
 
         def fake_snapshot(*args, **kwargs):
             raise exc
@@ -3175,7 +3175,7 @@ class ComputeTestCase(BaseTestCase):
     def test_snapshot_fails_with_glance_error(self):
         image_not_found = exception.ImageNotFound(image_id='fakesnap')
         self._test_snapshot_deletes_image_on_failure('error', image_not_found)
-        self.assertFalse(self.fake_image_delete_called)
+        self.assertFalse(self.fake_image_update_called)
         self._assert_state({'task_state': None})
 
     def test_snapshot_fails_with_task_state_error(self):
@@ -3185,19 +3185,19 @@ class ComputeTestCase(BaseTestCase):
             actual={'task_state': task_states.DELETING})
         self._test_snapshot_deletes_image_on_failure(
             'error', deleting_state_error)
-        self.assertTrue(self.fake_image_delete_called)
+        self.assertTrue(self.fake_image_update_called)
         self._test_snapshot_deletes_image_on_failure(
             'active', deleting_state_error)
-        self.assertFalse(self.fake_image_delete_called)
+        self.assertFalse(self.fake_image_update_called)
 
     def test_snapshot_fails_with_instance_not_found(self):
         instance_not_found = exception.InstanceNotFound(instance_id='uuid')
         self._test_snapshot_deletes_image_on_failure(
             'error', instance_not_found)
-        self.assertTrue(self.fake_image_delete_called)
+        self.assertTrue(self.fake_image_update_called)
         self._test_snapshot_deletes_image_on_failure(
             'active', instance_not_found)
-        self.assertFalse(self.fake_image_delete_called)
+        self.assertFalse(self.fake_image_update_called)
 
     def test_snapshot_handles_cases_when_instance_is_deleted(self):
         inst_obj = self._get_snapshotting_instance()

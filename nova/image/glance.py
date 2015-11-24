@@ -611,7 +611,7 @@ def _extract_attributes(image, include_locations=False):
 
 
 def _remove_read_only(image_meta):
-    IMAGE_ATTRIBUTES = ['status', 'updated_at', 'created_at', 'deleted_at']
+    IMAGE_ATTRIBUTES = ['updated_at', 'created_at', 'deleted_at']
     output = copy.deepcopy(image_meta)
     for attr in IMAGE_ATTRIBUTES:
         if attr in output:
