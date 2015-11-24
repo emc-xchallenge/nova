@@ -578,7 +578,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                               self.compute._get_power_state,
                               self.context, instance)
 
-    def test_init_instance_failed_resume_sets_error(self):
+    def test_init_instance_failed_resume_remain_original_state(self):
         instance = fake_instance.fake_instance_obj(
                 self.context,
                 uuid='fake-uuid',
@@ -596,8 +596,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                  'resume_state_on_host_boot')
         self.mox.StubOutWithMock(self.compute,
                                  '_get_instance_block_device_info')
-        self.mox.StubOutWithMock(self.compute,
-                                 '_set_instance_obj_error_state')
+
         self.compute._get_power_state(mox.IgnoreArg(),
                 instance).AndReturn(power_state.SHUTDOWN)
         self.compute._get_power_state(mox.IgnoreArg(),
@@ -610,9 +609,10 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         self.compute.driver.resume_state_on_host_boot(mox.IgnoreArg(),
                 instance, mox.IgnoreArg(),
                 'fake-bdm').AndRaise(test.TestingException)
-        self.compute._set_instance_obj_error_state(mox.IgnoreArg(), instance)
+
         self.mox.ReplayAll()
         self.compute._init_instance('fake-context', instance)
+        self.assertEqual(vm_states.ACTIVE, instance.vm_state)
 
     @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')

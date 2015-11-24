@@ -1188,7 +1188,6 @@ class ComputeManager(manager.Manager):
                 #             instance to error and attempt to continue.
                 LOG.warning(_LW('Failed to resume instance'),
                             instance=instance)
-                self._set_instance_obj_error_state(context, instance)
 
         elif drv_state == power_state.RUNNING:
             # VMwareAPI drivers will raise an exception
