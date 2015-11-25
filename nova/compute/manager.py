@@ -1188,7 +1188,10 @@ class ComputeManager(manager.Manager):
                 #             instance to error and attempt to continue.
                 LOG.warning(_LW('Failed to resume instance'),
                             instance=instance)
-                self._set_instance_obj_error_state(context, instance)
+                # NOTE(nj): We leave it as the original state so it can
+                #              be brought back without editing the DB 
+                #           BUT: we should actually not workround it like this. 
+                #                we have foce-delete/reset-state command now.
 
         elif drv_state == power_state.RUNNING:
             # VMwareAPI drivers will raise an exception
